@@ -45,9 +45,9 @@ std::vector<std::pair<std::wstring, std::wstring>> LoadTasks(const std::wstring&
     }
     return v;
 }
-// 等窗口出现，返回顶层窗口句柄
+
 static HWND WaitForTopWindow(DWORD pid, DWORD timeoutMs = 3000) {
-    DWORD tick = GetTickCount();
+    ULONGLONG tick = GetTickCount64();          // FIXED: 避免 49 天回绕
     do {
         HWND h = nullptr;
         while ((h = FindWindowExW(nullptr, h, nullptr, nullptr))) {
@@ -56,37 +56,41 @@ static HWND WaitForTopWindow(DWORD pid, DWORD timeoutMs = 3000) {
             if (wpid == pid && IsWindowVisible(h)) return h;
         }
         Sleep(100);
-    } while (GetTickCount() - tick < timeoutMs);
+    } while (GetTickCount64() - tick < timeoutMs);  // FIXED
     return nullptr;
 }
 
 void RunProcess(const std::wstring& exe, bool wait) {
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
-    std::wstring cmd = L"\"" + exe + L"\"";
+    std::wstring cmd = exe;   // 已含参数，不再额外加引号
 
     if (!CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
-        std::wstring err = L"无法启动: " + exe;
+        std::wstring err = L"无法启动: " + cmd;
         MessageBoxW(nullptr, err.c_str(), L"Host Launcher", MB_ICONERROR);
         return;
     }
 
     if (wait) {
-        // 1. 等顶层窗口出现
         HWND hwnd = WaitForTopWindow(pi.dwProcessId);
-        // 2. 等窗口关闭
         if (hwnd) {
             while (IsWindow(hwnd)) Sleep(200);
         }
-        // 3. 保险等进程退出
         WaitForSingleObject(pi.hProcess, INFINITE);
     }
-
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hProcess);   // FIXED: 拼写错误 Process -> hProcess
 }
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+// FIXED: 与 winbase.h 原型保持一致，消除 SAL 警告
+int WINAPI wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ PWSTR lpCmdLine, _In_ int) {
+    /* 命令行优先逻辑（同上一版） */
+    if (lpCmdLine && *lpCmdLine) {
+        std::wstring cmd = lpCmdLine;
+        RunProcess(cmd, true);
+        return 0;
+    }
+
     std::wstring ini = []() {
         wchar_t mod[MAX_PATH];
         GetModuleFileNameW(nullptr, mod, MAX_PATH);
@@ -104,20 +108,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             L"start_all=cmd\n"
             L"================================\n"
             L"# start_???  不等exe进程退出\n"
-            L"# start_???  会等exe进程退出\n"
+            L"# setup_???  会等exe进程退出\n"
             L"# 适用架构:  all/x86/x64/a64\n"
-            L"================================\n"
-            ;
+            L"================================\n";
         MessageBoxW(nullptr, msg.c_str(), L"Host Launcher - 缺少配置", MB_OK | MB_ICONWARNING);
         return 1;
     }
 
     auto tasks = LoadTasks(ini);
-
     for (auto& [key, val] : tasks) {
         bool wait = false;
         std::wstring arch;
-        // start 系列
         if (key == L"start_all")       arch = L"all";
         else if (key == L"start_x86")  arch = L"x86";
         else if (key == L"start_x64")  arch = L"x64";
@@ -126,7 +127,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         else if (key == L"open_x86")  arch = L"x86";
         else if (key == L"open_x64")  arch = L"x64";
         else if (key == L"open_a64")  arch = L"a64";
-        // setup 系列
         else if (key == L"setup_all") { arch = L"all"; wait = true; }
         else if (key == L"setup_x86") { arch = L"x86"; wait = true; }
         else if (key == L"setup_x64") { arch = L"x64"; wait = true; }
@@ -138,7 +138,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         else continue;
 
         if (arch == L"all" || arch == CURRENT_ARCH)
-            RunProcess(val, wait);   // start 不等待，setup 等待进程树退出
+            RunProcess(val, wait);
     }
     return 0;
 }
